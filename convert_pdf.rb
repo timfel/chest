@@ -29,11 +29,11 @@ EOF
   opts.on("-i INPUT", "input pdf") { |v| $input = v }
   opts.on("-o OUTPUT", "output pdf") { |v| $output = v }
 
-  opts.on("-p PADDINGPAGE", "which page to duplicate for padding (defaults to last)") { |v| $paddingpage = v.to_i }
+  opts.on("-p PADDINGPAGE", "which book page to duplicate for padding (defaults to last)") { |v| $paddingpage = v.to_i }
 
   opts.on("-s PAGERANGE", <<EOF) { |v| $skip_page_spec = v }
 
-Page (ranges) to not split in half, because they are not facing pages.
+PDF page (ranges) to not split in half, because they are not facing pages.
 By default this is the first and last page. Page ranges are in the same
 format as commonly used by printers: A comma-separated list of single
 page numbers or range, e.g.: 1,2,12-15,24.
@@ -95,11 +95,16 @@ end
 
 largest_w = 0
 largest_h = 0
+pagecnt = 0
 
 data.scan(/PageMediaNumber/) do |str|
   match = $~
   cnt += 1
-  next if skip_range.include? cnt
+  if skip_range.include? cnt
+    pagecnt += 1
+    FileUtils.cp cnt_to_pdf(cnt), cnt_to_single(pagecnt)
+    next
+  end
   raise "parsing error" if cnt > max_cnt
 
   match.post_match =~ /PageMediaDimensions: (\d+\.?\d*) (\d+\.?\d*)/
@@ -109,22 +114,23 @@ data.scan(/PageMediaNumber/) do |str|
   largest_h = [height, largest_h].max
 
   current_file = cnt_to_pdf(cnt)
-  left_out = cnt_to_pdf.sub("#{cnt}", "#{cnt}_l")
-  right_out = current_file.sub("#{cnt}", "#{cnt}_r")
+  left_out = cnt_to_single(pagecnt + 1)
+  right_out = cnt_to_single(pagecnt + 2)
 
   xsystem "pdfcrop --margins '0 0 -#{width / 2} 0' #{current_file} #{left_out}"
   xsystem "pdfcrop --margins '-#{width / 2} 0 0 0' #{current_file} #{right_out}"
+  pagecnt += 2
   File.unlink(current_file)
 end
 
-if (padding_pages = 4 - max_cnt % 4) != 0
+if (padding_pages = 4 - pagecnt % 4) != 0
   # this won't be a good booklet, pad before the last page
-  File.rename cnt_to_pdf(max_cnt), cnt_to_pdf(max_cnt + padding_pages)
+  File.rename cnt_to_single(pagecnt), cnt_to_single(pagecnt + padding_pages)
 
-  $paddingpage = max_cnt + $paddingpage + 1 if $paddingpage < 0
+  $paddingpage = pagecnt + $paddingpage + 1 if $paddingpage < 0
   
   padding_pages.times do |i|
-    FileUtils.copy cnt_to_pdf($paddingpage), cnt_to_pdf(max_cnt + i)
+    FileUtils.copy cnt_to_single($paddingpage), cnt_to_single(pagecnt + i)
   end
 end
 
