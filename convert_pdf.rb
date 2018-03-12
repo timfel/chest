@@ -111,9 +111,9 @@ class Runner
   def pad_pages
     (4 - book_page_count % 4).times do |i|
       if (i % 2 == 0 && pad_split? || pad_front?) .. pad_split?
-        pages.insert(1, Page.copy_from(pages[padding_page + 1], i))
+        pages.insert(1, Page.copy_from(pages[padding_page - 1], i))
       else
-        pages.insert(-2, Page.copy_from(pages[padding_page + 1], i))
+        pages.insert(-2, Page.copy_from(pages[padding_page - 1], i))
       end
     end
   end
@@ -273,8 +273,10 @@ class Page
     FileUtils.copy path, lname
     File.rename path, rname
 
-    left_file = Page.new(lname).crop("--margins '0 0 -#{width / 2} 0'")
-    right_file = Page.new(rname).crop("--margins '-#{width / 2} 0 0 0'")
+    left_file = Page.new(lname)
+    left_file.crop("--margins '0 0 -#{width / 2} 0'")
+    right_file = Page.new(rname)
+    right_file.crop("--margins '-#{width / 2} 0 0 0'")
 
     [left_file, right_file]
   end
