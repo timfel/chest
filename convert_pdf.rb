@@ -68,7 +68,7 @@ class Runner
         if skip_range.include? cnt
           pages << Page.new(current_file)
         else
-          pages += Page.new(current_file).split(width)
+          self.pages += Page.new(current_file).split(width)
         end
       end
 
