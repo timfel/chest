@@ -2,14 +2,167 @@
 
 require "optparse"
 require "fileutils"
+require "tempfile"
+require "tmpdir"
 
-$input = $output = nil
-$skip_page_spec = "1,-1"
-$paddingpage = -1
-$padding_where = "split"
 
-OptionParser.new do |opts|
-  opts.banner = <<EOF
+def xsystem(*args)
+  puts args
+  system(*args).tap { |code| exit(1) unless code }
+end
+
+class Tempfile
+  def self.newname(*args, &block)
+    Tempfile.create(['mytmp', '.pdf']) do |f|
+      path = block.call(f.path)
+      if path.respond_to? :to_str
+        FileUtils.copy f.path, path
+      end
+    end
+  end
+end
+
+
+class Runner
+  attr_accessor :input, :output, :skip_page_spec, :padding_page, :padding_spec,
+                :pdf_page_count, :smallest_w, :smallest_h, :pages
+
+  def initialize
+    self.skip_page_spec = "1,-1"
+    self.padding_page = -1
+    self.padding_spec = "split"
+
+    self.smallest_w = 2**32
+    self.smallest_h = 2**32
+    self.pages = []
+  end
+
+  def book_page_count
+    pages.size
+  end
+
+  PADDING = 4
+
+  def run
+    Dir.mktmpdir do |dir|
+      xsystem "pdftk '#{input}' burst output #{dir}/page_%0#{PADDING}d.pdf"
+
+      data = File.read "#{dir}/doc_data.txt"
+
+      cnt = 0
+      data =~ /NumberOfPages:\s+(\d+)/
+      self.pdf_page_count = $1.to_i
+
+      puts "Processing #{input} -> #{output} with #{pdf_page_count} pages, skipping #{skip_range.join(',')}"
+
+      data.scan(/PageMediaNumber/) do |str|
+        match = $~
+        match.post_match =~ /PageMediaDimensions: (\d+\.?\d*)/
+        width = $1.to_f
+
+        cnt += 1
+        current_file = "#{dir}/page_#{cnt.to_s.rjust(PADDING, '0')}.pdf"
+
+        raise "parsing error" if cnt > pdf_page_count
+
+        if skip_range.include? cnt
+          pages << Page.new(current_file)
+        else
+          pages += Page.new(current_file).split(width)
+        end
+      end
+
+      pages.each(&:crop)
+
+      self.smallest_w = pages.map(&:width).min
+      self.smallest_h = pages.map(&:height).min
+
+      gets
+      pages.each { |p| p.resize self.smallest_w, self.smallest_h }
+
+      pad_pages
+
+      Tempfile.newname do |tmppath|
+        xsystem "pdftk #{page_paths.join(' ')} cat output #{tmppath}"
+        xsystem "pdfbook --suffix 'foo' #{tmppath}"
+        File.rename File.basename(tmppath).sub(/\.pdf$/, "-foo.pdf"), output
+        nil
+      end
+
+      puts "Booklet written to #{output}"
+    end
+  end
+
+  def page_paths
+    pages.map(&:path)
+  end
+
+  def pad_split?
+    padding_spec =~ /split/
+  end
+
+  def pad_front?
+    padding_spec =~ /front/
+  end
+
+  def pad_back?
+    padding_spec = /back/
+  end
+
+  def pad_pages
+    (4 - book_page_count % 4).times do |i|
+      if (i % 2 == 0 && pad_split? || pad_front?) .. (i % 1 == 0 && pad_split?)
+        pages.insert(1, Page.copy_from(pages[padding_page + 1], i))
+      else
+        pages.insert(-2, Page.copy_from(pages[padding_page + 1], i))
+      end
+    end
+  end
+
+  def input=(arg)
+    if arg.end_with? ".pdf"
+      @input = arg
+    else
+      @input = "#{arg}.pdf"
+    end
+  end
+
+  def output
+    @output || @input.sub(/.pdf$/, "-printable.pdf")
+  end
+
+  def skip_page_spec=(arg)
+    @skip_page_spec = arg
+    @skip_range = nil
+  end
+
+  def skip_range
+    return @skip_range if @skip_range
+
+    @skip_range = []
+    skip_page_spec.split(",").each do |range|
+      if range =~ /(\-?\d+)\-(\-?\d+)/
+        start = $1.to_i
+        stop = $2.to_i
+      else
+        start = stop = range.to_i
+      end
+
+      start = pdf_page_count + start + 1 if start < 0
+      stop = pdf_page_count + stop + 1 if stop < 0
+
+      @skip_range += (start..stop).to_a
+    end
+    @skip_range.sort!
+  end
+
+  def self.go
+    self.new.go
+  end
+
+  def go
+    OptionParser.new do |opts|
+      opts.banner = <<EOF
 Usage: pdfbooklet.rb -i INPUT [-o OUTPUT] [-s PAGERANGE]
 
 pdfbooklet.rb can be used to cut and reassemble scanned books so they can
@@ -27,14 +180,15 @@ printing a booklet works as desired.
 
 EOF
 
-  opts.on("-i INPUT", "input pdf") { |v| $input = v }
-  opts.on("-o OUTPUT", "output pdf") { |v| $output = v }
+      opts.on("-i INPUT", "input pdf") { |v| @input = v }
 
-  opts.on("--padding-position POSITION", "where to insert padding: 'front', 'back', 'split'") { |v| $padding_where = v }
+      opts.on("-o OUTPUT", "output pdf") { |v| @output = v }
 
-  opts.on("--padding-page PADDINGPAGE", "which BOOK page to duplicate for padding (defaults to last)") { |v| $paddingpage = v.to_i }
+      opts.on("--padding-position POSITION", "where to insert padding: 'front', 'back', 'split'") { |v| @padding_spec = v }
 
-  opts.on("--single-pages PAGERANGE", <<EOF) { |v| $skip_page_spec = v }
+      opts.on("--padding-page PADDINGPAGE", "which BOOK page to duplicate for padding (defaults to last)") { |v| @padding_page = v.to_i }
+
+      opts.on("--single-pages PAGERANGE", <<EOF) { |v| @skip_page_spec = v }
 
 PDF page (ranges) to not split in half, because they are not facing pages.
 By default this is the first and last page. Page ranges are in the same
@@ -45,130 +199,87 @@ Negative numbers are possible to count from the end, so the default can
 be expressed as 1,-1 and if all pages are already single-page scans, then
 1--1 (the second '-' is the unary minus) doesn't separate pages at all.
 EOF
-end.parse!
+    end.parse!
 
-if $input.nil?
-  puts "No options given. Try --help"
-  exit 1
-end
-
-$output ||= $input.sub(/.pdf$/, '-booklet.pdf')
-
-raise "Doesn't end with .pdf" unless $input.end_with? ".pdf"
-
-PADDING = 4
-
-def xsystem(*args)
-  puts args
-  system(*args).tap { |code| exit(1) unless code }
-end
-
-xsystem "pdftk '#{$input}' burst output page_%0#{PADDING}d.pdf"
-
-data = File.read "doc_data.txt"
-
-cnt = 0
-data =~ /NumberOfPages:\s+(\d+)/
-max_cnt = $1.to_i
-
-skip_range = []
-$skip_page_spec.split(",").each do |range|
-  if range =~ /(\-?\d+)\-(\-?\d+)/
-    start = $1.to_i
-    stop = $2.to_i
-  else
-    start = stop = range.to_i
-  end
-
-  start = max_cnt + start + 1 if start < 0
-  stop = max_cnt + stop + 1 if stop < 0
-
-  skip_range += (start..stop).to_a
-end
-skip_range.sort!
-
-puts "Processing #{$input} -> #{$output} with #{max_cnt} pages, skipping #{skip_range.join(',')}"
-
-def cnt_to_pdf(cnt)
-  "page_#{cnt.to_s.rjust(PADDING, '0')}.pdf"
-end
-
-def cnt_to_single(cnt)
-  cnt_to_pdf(cnt).sub("page_", "single_")
-end
-
-largest_w = 0
-largest_h = 0
-pagecnt = 0
-
-data.scan(/PageMediaNumber/) do |str|
-  match = $~
-
-  match.post_match =~ /PageMediaDimensions: (\d+\.?\d*) (\d+\.?\d*)/
-  width = $1.to_f
-  height = $2.to_f
-  largest_w = [width, largest_w].max
-  largest_h = [height, largest_h].max
-
-  cnt += 1
-  if skip_range.include? cnt
-    pagecnt += 1
-    FileUtils.cp cnt_to_pdf(cnt), cnt_to_single(pagecnt)
-    next
-  end
-  raise "parsing error" if cnt > max_cnt
-
-  current_file = cnt_to_pdf(cnt)
-  left_out = cnt_to_single(pagecnt + 1)
-  right_out = cnt_to_single(pagecnt + 2)
-
-  xsystem "pdfcrop --margins '0 0 -#{width / 2} 0' #{current_file} #{left_out}"
-  xsystem "pdfcrop --margins '-#{width / 2} 0 0 0' #{current_file} #{right_out}"
-  pagecnt += 2
-  File.unlink(current_file)
-end
-
-Dir['single_*.pdf'].each do |pdf|
-  xsystem("gs -o converted-#{pdf} -sDEVICE=pdfwrite -dPDFFitPage -r300x300 -g#{largest_w.to_i}x#{largest_h.to_i} #{pdf}")
-  File.rename "converted-#{pdf}", pdf
-end
-
-def pad_page(paddingpage, i, pagecnt, where = :front)
-  padding_name = cnt_to_single(where == :front ? 1 : pagecnt - 1)
-  FileUtils.copy cnt_to_single(paddingpage), padding_name.sub(/.pdf$/, "_#{i}_padding.pdf")
-end
-
-if (padding_pages = 4 - pagecnt % 4) != 0
-  # this won't be a good booklet, pad before the last page
-  $paddingpage = pagecnt + $paddingpage + 1 if $paddingpage < 0
-
-  if $padding_where =~ /front/
-    padding_pages.times do |i|
-      pad_page($paddingpage, i, pagecnt, where = :front)
+    if @input.nil?
+      puts "No options given. Try --help"
+      exit 1
     end
-  elsif $padding_where =~ /back/
-    padding_pages.times do |i|
-      pad_page($paddingpage, i, pagecnt, where = :back)
-    end
-  elsif $padding_where =~ /split/
-    padding_pages.times do |i|
-      if (i % 2 == 0) .. (i % 1 == 0)
-        pad_page($paddingpage, i, pagecnt, where = :front)
-      else
-        pad_page($paddingpage, i, pagecnt, where = :back)
-      end
-    end
-  else
-    raise "Invalid padding value. See --help"
+
+    run
   end
 end
 
-xsystem "pdftk #{Dir['single_*.pdf'].sort.join(' ')} cat output temp.pdf"
-xsystem "pdfbook --suffix book temp.pdf"
 
-File.unlink "temp.pdf"
-Dir['page_*.pdf'].each { |pdf| File.unlink pdf }
-Dir['single_*.pdf'].each { |pdf| File.unlink pdf }
+class Page
+  attr_accessor :path
 
-File.rename "temp-book.pdf", $output
-puts "Booklet written to #{$output}"
+  def initialize(path)
+    @path = path
+  end
+
+  def self.copy_from(page, suffix)
+    name =  page.path.sub(/\.pdf$/, "_#{suffix}.pdf")
+    FileUtils.copy page.path, name
+    Page.new(name)
+  end
+
+  def width
+    return @width if @width
+    calculate_dims
+    @width
+  end
+
+  def height
+    return @height if @height
+    calculate_dims
+    @height
+  end
+
+  def calculate_dims
+    info = `pdftk #{@path} dump_data`
+    info =~ /PageMediaCropRect: (\d+\.?\d*) (\d+\.?\d*) (\d+\.?\d*) (\d+\.?\d*)/
+    if $1.nil?
+      info =~ /PageMediaRect: (\d+\.?\d*) (\d+\.?\d*) (\d+\.?\d*) (\d+\.?\d*)/
+    end
+    @left = $1.to_i
+    @top = $2.to_i
+    @right = $3.to_i
+    @bottom = $4.to_i
+    @width = @right - @left
+    @height = @bottom - @top
+  end
+
+  def resize(w, h)
+    left_diff = width - w
+    top_diff = height - h
+
+    Tempfile.newname do |tmppath|
+      xsystem "gs -o #{tmppath} -sDEVICE=pdfwrite -dDEVICEWIDTHPOINTS=#{w} -dDEVICEHEIGHTPOINTS=#{h} -dFIXEDMEDIA #{path}"
+      path
+    end
+  end
+
+  def crop(opts = "")
+    Tempfile.newname do |tmppath|
+      xsystem "pdfcrop #{opts} #{path} #{tmppath}"
+      path
+    end
+  end
+
+  def split(width)
+    lname = path.sub(/\.pdf$/, "_1.pdf")
+    rname = path.sub(/\.pdf$/, "_2.pdf")
+
+    FileUtils.copy path, lname
+    File.rename path, rname
+
+    left_file = Page.new(lname).crop("--margins '0 0 -#{width / 2} 0'")
+    right_file = Page.new(rname).crop("--margins '-#{width / 2} 0 0 0'")
+
+    [left_file, right_file]
+  end
+end
+
+
+Runner.go
