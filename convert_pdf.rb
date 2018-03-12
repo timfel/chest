@@ -77,7 +77,6 @@ class Runner
       self.smallest_w = pages.map(&:width).min
       self.smallest_h = pages.map(&:height).min
 
-      gets
       pages.each { |p| p.resize self.smallest_w, self.smallest_h }
 
       pad_pages
@@ -111,7 +110,7 @@ class Runner
 
   def pad_pages
     (4 - book_page_count % 4).times do |i|
-      if (i % 2 == 0 && pad_split? || pad_front?) .. (i % 1 == 0 && pad_split?)
+      if (i % 2 == 0 && pad_split? || pad_front?) .. pad_split?
         pages.insert(1, Page.copy_from(pages[padding_page + 1], i))
       else
         pages.insert(-2, Page.copy_from(pages[padding_page + 1], i))
