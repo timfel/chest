@@ -109,7 +109,7 @@ class Runner
   end
 
   def pad_pages
-    (4 - book_page_count % 4).times do |i|
+    ((4 - book_page_count % 4) % 4).times do |i|
       if (i % 2 == 0 && pad_split? || pad_front?) .. pad_split?
         pages.insert(1, Page.copy_from(pages[padding_page - 1], i))
       else
